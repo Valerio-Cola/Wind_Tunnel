@@ -396,7 +396,7 @@ int main(int argc, char *argv[]) {
 		// 4.2. Particles movement each STEPS iterations
 		if ( iter % STEPS == 1 ) {
 			// Clean particle positions
-			for( i=0; i<=iter && i<rows; i++ ) 
+			for( i=0; /*i<=iter &&*/ i<rows; i++ ) 
 				for( j=0; j<columns; j++ )
 					accessMat( particle_locations, i, j ) = 0;
 
@@ -415,6 +415,16 @@ int main(int argc, char *argv[]) {
 					particles[ particle ].pos_row / PRECISION,
 					particles[ particle ].pos_col / PRECISION ) += 1;
 			}
+
+			// Stampa elementi di particle_locations
+			for( i=0; i<rows; i++ ) {
+				for( j=0; j<columns; j++ ) {
+					printf("%d ", accessMat( particle_locations, i, j ));
+				}
+				printf("\n");
+			}
+
+			
 		} // End particles movements
 #endif // MODULE3
 

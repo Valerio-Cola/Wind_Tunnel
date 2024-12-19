@@ -108,7 +108,7 @@ int update_flow( int *flow, int *flow_copy, int *particle_locations, int row, in
  * Function: Move particle
  * 	This function can be changed and/or optimized by the students
  */
-void move_particle( int *flow, Particle *particles, int particle, int rows, int columns ) {
+void move_particle( int *flow, Particle *particles, int particle, int rows, int columns, int rank, int size ) {
 	// Compute movement for each step
 	int step;
 	for( step = 0; step < STEPS; step++ ) {
@@ -138,8 +138,10 @@ void move_particle( int *flow, Particle *particles, int particle, int rows, int 
 			particles[ particle ].pos_col + particles[ particle ].speed_col / STEPS / 2;
 
 		// Control limits
-		if ( particles[ particle ].pos_row >= PRECISION * rows )
-			particles[ particle ].pos_row = PRECISION * rows - 1;
+		if (rank = size - 1) {
+			if ( particles[ particle ].pos_row >= PRECISION * rows )
+				particles[ particle ].pos_row = PRECISION * rows - 1;
+		}
 		if ( particles[ particle ].pos_col < 0 )
 			particles[ particle ].pos_col = 0;
 		if ( particles[ particle ].pos_col >= PRECISION * columns )
@@ -373,136 +375,117 @@ int main(int argc, char *argv[]) {
 // MPI Version: Eliminate this conditional to start doing the work in parallel
 	int size;
 	MPI_Comm_size( MPI_COMM_WORLD, &size );
-	
-	// Suddivido le righe tra i processi semplificato (non considera il resto)
-	// ES 20 righe 4 processi -> 5 righe per processo
 	int my_rows = rows / size;
 	int my_first_row = rank * my_rows;
 	int my_last_row = my_first_row + my_rows;
 
 	/* 3. Initialization */
-	int *local_flow = (int *)malloc( sizeof(int) * (size_t)my_rows * (size_t)columns );
-	int *local_flow_copy = (int *)malloc( sizeof(int) * (size_t)my_rows * (size_t)columns );
-	int *local_particle_locations = (int *)malloc( sizeof(int) * (size_t)my_rows * (size_t)columns );
+	flow = (int *)malloc( sizeof(int) * (size_t)my_rows * (size_t)columns );
+	flow_copy = (int *)malloc( sizeof(int) * (size_t)my_rows * (size_t)columns );
+	particle_locations = (int *)malloc( sizeof(int) * (size_t)my_rows * (size_t)columns );
 
-	if ( local_flow == NULL || local_flow_copy == NULL || local_particle_locations == NULL ) {
+	if ( flow == NULL || flow_copy == NULL || particle_locations == NULL ) {
 		fprintf(stderr,"-- Error allocating culture structures for size: %d x %d \n", rows, columns );
 		MPI_Abort( MPI_COMM_WORLD, EXIT_FAILURE );
 	}
 
-	// Initialize flow and particle locations
 	for( i=0; i<my_rows; i++ ) {
 		for( j=0; j<columns; j++ ) {
-			accessMat( local_flow, i, j ) = 0;
-			accessMat( local_flow_copy, i, j ) = 0;
-			accessMat( local_particle_locations, i, j ) = 0;
+			accessMat( flow, i, j ) = 0;
+			accessMat( flow_copy, i, j ) = 0;
+			accessMat( particle_locations, i, j ) = 0;
 		}
 	}
 
 	/* 4. Simulation */
+	printf("inizio simulazione, processo: %d\n", rank);
 	for( iter=1; iter<=max_iter && max_var > var_threshold; iter++) {
-		// Non abbiamo problemi poichè il rank 0 ha nel proprio local_flow la riga 0
-		if(rank == 0){
-		// Ogni 8 iterazioni cambia il comportamento della ventola
+
+		// 4.1. Change inlet values each STEP iterations
+		printf("primo passo, processo: %d\n", rank);
+		if (rank == 0) {
 			if ( iter % STEPS == 1 ) {
 				for ( j=inlet_pos; j<inlet_pos+inlet_size; j++ ) {
 					// 4.1.1. Change the fans phase
 					double phase = iter / STEPS * ( M_PI / 4 );
 					double phase_step = M_PI / 2 / inlet_size;
 					double pressure_level = 9 + 2 * sin( phase + (j-inlet_pos) * phase_step );
-
+	
 					// 4.1.2. Add some random noise
 					double noise = 0.5 - erand48( random_seq );
 
 					// 4.1.3. Store level in the first row of the ancillary structure
-					accessMat( local_flow, 0, j ) = (int)(PRECISION * (pressure_level + noise));
+					accessMat( flow, 0, j ) = (int)(PRECISION * (pressure_level + noise));
 				}
-			} 
-		} // End inlet update
-	}
+			} // End inlet update
+		}	
+
 #ifdef MODULE2
 #ifdef MODULE3
-		// Ogni 8 iterazioni 
+		// 4.2. Particles movement each STEPS iterations
+		printf("secondo passo, processo: %d\n", rank);
 		if ( iter % STEPS == 1 ) {
-			// Scorre tutte le righe fino a qeuella corrente (scorre solo le righe con flusso) e azzera le posizioni delle particelle
-			for( i=my_first_row; i<=iter && i<my_rows; i++ ) 
+			// Clean particle positions
+			for( i=0; /*i<=iter &&*/ i<my_rows; i++ ) 
 				for( j=0; j<columns; j++ )
-					// Azzera la posizione delle particelle in posizione i,j in particle_locations
-					accessMat( local_particle_locations, i, j ) = 0;
+					accessMat( particle_locations, i, j ) = 0;
 
-			// Le particelle senza massa sono fisse e le ignora 
+			printf("prima del for, processo: %d\n", rank);
+
 			int particle;
 			for( particle = 0; particle < num_particles; particle++ ) {
+				if (particles[ particle ].pos_row / PRECISION > my_last_row && particles[ particle ].pos_row / PRECISION < my_first_row) continue;
 				int mass = particles[ particle ].mass;
-				// Fisse
-				if ( mass == 0 || particles[particle].pos_row / PRECISION < my_first_row || particles[particle].pos_row / PRECISION > my_last_row) continue;
-				// Altrimenti muovi quella particella
-				move_particle( local_flow, particles, particle, rows, columns);
+				// Fixed particles
+				if ( mass == 0 ) continue;
+				// Movable particles
+				move_particle( flow, particles, particle, my_rows, columns , rank, size);
 			} 
 
-			// Aggiorna la posizione delle particelle in particle_locations
+			printf("dopo il for, processo: %d\n", rank);
+
+			// Annotate position
 			for( particle = 0; particle < num_particles; particle++ ) {
-				if (particles[particle].pos_row / PRECISION < my_first_row || particles[particle].pos_row / PRECISION > my_last_row) continue;
-				accessMat(local_particle_locations, 
-					particles[ particle ].pos_row / PRECISION,
+				if (particles[ particle ].pos_row / PRECISION > my_last_row && particles[ particle ].pos_row / PRECISION < my_first_row) continue;
+				accessMat( particle_locations, 
+					((particles[ particle ].pos_row) - my_first_row) / PRECISION,
 					particles[ particle ].pos_col / PRECISION ) += 1;
 			}
 		} // End particles movements
-
-		// Gather all particle locations from all processes copilot
-		MPI_Allgather(MPI_IN_PLACE, 0, MPI_DATATYPE_NULL, particles, num_particles / size, MPI_BYTE, MPI_COMM_WORLD);
 #endif // MODULE3
+	printf("fin qui tutto ok, processo: %d\n", rank);
+	MPI_Barrier( MPI_COMM_WORLD );
 
 		// 4.3. Effects due to particles each STEPS iterations
-		// Ogni 8 iterazioni calcola come la particella influisce sul flusso d'aria
 		if ( iter % STEPS == 1 ) {
 			int particle;
 			for( particle = 0; particle < num_particles; particle++ ) {
-				//Prendo la posizione della particella
 				int row = particles[ particle ].pos_row / PRECISION;
 				int col = particles[ particle ].pos_col / PRECISION;
 
-				// Aggiorna il flusso d'aria in quella posizione solo se particella di mia competenza
-				if( row >= my_first_row && row < my_last_row ){
-					update_flow( local_flow, local_flow_copy, local_particle_locations, row, col, columns, 0 );
-
-					// Salva il flusso d'aria prima di applicare gli effetti
-					particles[ particle ].old_flow = accessMat( local_flow, row, col );
-				}
+				update_flow( flow, flow_copy, particle_locations, row, col, columns, 0 );
+				particles[ particle ].old_flow = accessMat( flow, row, col );
 			}
-			// Utilizzo sende e receive in modo che i rank dopo il 0 abbiano l'ultima riga del rank precedente 
-			if (rank > 0) {
-				MPI_Send(local_flow, columns, MPI_INT, rank - 1, 0, MPI_COMM_WORLD);
-			}
-			if (rank < size - 1) {
-				MPI_Recv(local_flow + my_rows * columns, columns, MPI_INT, rank + 1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-			}
-
 			for( particle = 0; particle < num_particles; particle++ ) {
-				if( particles[particle].pos_row / PRECISION >= my_first_row && particles[particle].pos_row / PRECISION < my_last_row ){
-					// Prende di nuovo ogni particella e la sua resistenza
-					int row = particles[ particle ].pos_row / PRECISION;
-					int col = particles[ particle ].pos_col / PRECISION;
-					int resistance = particles[ particle ].resistance;
+				int row = particles[ particle ].pos_row / PRECISION;
+				int col = particles[ particle ].pos_col / PRECISION;
+				int resistance = particles[ particle ].resistance;
 
-					int back = (int)( (long)particles[ particle ].old_flow * resistance / PRECISION ) / accessMat( local_particle_locations, row, col );
-					accessMat( local_flow, row, col ) -= back;
+				int back = (int)( (long)particles[ particle ].old_flow * resistance / PRECISION ) / accessMat( particle_locations, row, col );
+				accessMat( flow, row, col ) -= back;
+			
+				accessMat( flow, row-1, col ) += back / 2;
 
-					accessMat( local_flow, row-1, col ) += back / 2;
-
-					if ( col > 0 )
-						accessMat( local_flow, row-1, col-1 ) += back / 4;
-					else
-						accessMat( local_flow, row-1, col ) += back / 4;
-					if ( col < columns-1 )
-						accessMat( local_flow, row-1, col+1 ) += back / 4;
-					else
-						accessMat( local_flow, row-1, col ) += back / 4;
-				}
+				if ( col > 0 )
+					accessMat( flow, row-1, col-1 ) += back / 4;
+				else
+					accessMat( flow, row-1, col ) += back / 4;
+				if ( col < columns-1 )
+					accessMat( flow, row-1, col+1 ) += back / 4;
+				else
+					accessMat( flow, row-1, col ) += back / 4;
 			}
 		} // End effects
-
-		MPI_Allgather(MPI_IN_PLACE, 0, MPI_DATATYPE_NULL, particles, num_particles / size, MPI_BYTE, MPI_COMM_WORLD);
 #endif // MODULE2
 
 
@@ -533,33 +516,34 @@ int main(int argc, char *argv[]) {
 		
 #ifdef DEBUG
 		// 4.7. DEBUG: Print the current state of the simulation at the end of each iteration 
-		if(rank == 0){
-			print_status( iter, rows, columns, flow, num_particles, particle_locations, max_var );
-		}
+		print_status( iter, rows, columns, flow, num_particles, particle_locations, max_var );
 #endif
 
-	} // End iterations
+	 // End iterations
 
 	// MPI: Fill result arrays used for later output
 	int local_resultsA[6];
-	int local_resultsB[6];
-	int local_resultsC[6];
-	
-	int ind;
-	for ( ind=0; ind<6; ind++ )
-		local_resultsA[ ind ] = accessMat( local_flow, STEPS-1, ind * columns/6 );
+    int local_resultsB[6];
+    int local_resultsC[6];
 
-	int res_row = ( iter-1 < rows-1 ) ? iter-1 : rows-1;
-	for ( ind=0; ind<6; ind++ )
-		local_resultsB[ ind ] = accessMat( local_flow, res_row/2, ind * columns/6 );
+    int ind;
+    for ( ind=0; ind<6; ind++ )
+        local_resultsA[ ind ] = accessMatLocal( flow, STEPS-1 + my_first_row, ind * columns/6 );
 
-	for ( ind=0; ind<6; ind++ )
-		local_resultsC[ ind ] = accessMat( local_flow, res_row, ind * columns/6 );
-	
-	// Faccio una reduce così che ogni processo invia i propri risultati all'array finale sommando
-	MPI_Reduce(local_resultsA, resultsA, 6, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
-	MPI_Reduce(local_resultsB, resultsB, 6, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
-	MPI_Reduce(local_resultsC, resultsC, 6, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
+    int res_row = ( iter-1 < rows-1 ) ? iter-1 : rows-1;
+    for ( ind=0; ind<6; ind++ )
+        local_resultsB[ ind ] = accessMatLocal( flow, res_row/2 + my_first_row, ind * columns/6 );
+
+    for ( ind=0; ind<6; ind++ )
+        local_resultsC[ ind ] = accessMatLocal( flow, res_row + my_first_row, ind * columns/6 );
+
+    // Faccio una reduce così che ogni processo invia i propri risultati all'array finale sommando
+    MPI_Reduce(local_resultsA, resultsA, 6, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(local_resultsB, resultsB, 6, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(local_resultsC, resultsC, 6, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
+
+// MPI Version: Eliminate this conditional-end to start doing the work in parallel
+}
 	
 /*
  *
