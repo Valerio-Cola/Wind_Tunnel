@@ -376,9 +376,9 @@ int main(int argc, char *argv[]) {
 	
 	// Suddivido le righe tra i processi semplificato (non considera il resto)
 	// ES 20 righe 4 processi -> 5 righe per processo
-	my_rows = rows / size;
-	my_first_row = rank * my_rows;
-	my_last_row = my_first_row + my_rows;
+	int my_rows = rows / size;
+	int my_first_row = rank * my_rows;
+	int my_last_row = my_first_row + my_rows;
 
 	/* 3. Initialization */
 	int *local_flow = (int *)malloc( sizeof(int) * (size_t)my_rows * (size_t)columns );
