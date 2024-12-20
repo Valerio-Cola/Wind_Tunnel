@@ -169,7 +169,7 @@ void move_particle( int *flow, Particle *particles, int particle, int rows, int 
 			particles[ particle ].pos_col + particles[ particle ].speed_col / STEPS / 2;
 
 		// Control limits
-		if (rank == size - 1) {
+		if (rank = size - 1) {
 			if ( particles[ particle ].pos_row >= PRECISION * rows )
 				particles[ particle ].pos_row = PRECISION * rows - 1;
 		}
@@ -441,7 +441,7 @@ int main(int argc, char *argv[]) {
 	}
 
 	/* 4. Simulation */
-	for( iter=1; iter<=max_iter /*&& max_var > var_threshold*/; iter++) {
+	for( iter=1; iter<=max_iter && max_var > var_threshold; iter++) {
 	
 		// 4.1. Change inlet values each STEP iterations
 		if (rank == 0) {
@@ -492,38 +492,17 @@ int main(int argc, char *argv[]) {
 #endif // MODULE3
 		MPI_Barrier( MPI_COMM_WORLD );
 
-
-		if (rank == 0) {
-			printf("Elements of the last row of the flow matrix in rank 0:\n");
-			for (int i = 0; i < columns; i++) {
-				printf("%d ", accessMat(flow, my_rows - 1, i));
-			}
-			printf("\n");
-		}
-		
-		if ( rank < size - 1) {
-
-			MPI_Send(&flow[(my_rows - 1) * columns], columns, MPI_INT, rank + 1, 0, MPI_COMM_WORLD);
-		}
-
-		if (rank > 0){
-			MPI_Recv(prev_last_row, columns, MPI_INT, rank - 1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-		}
-		
-		if (rank == 1) {
-			printf("prev_last_row:\n");
-			for (int i = 0; i < columns; i++) {
-				printf("%d ", prev_last_row[i]);
-			}
-			printf("\n");
-		}
 		// 4.3. Effects due to particles each STEPS iterations
 		if ( iter % STEPS == 1 ) {
-			
-
+			if ( rank < size - 1) {
+				MPI_Send(&flow[(my_rows - 1) * columns], columns, MPI_INT, rank + 1, 0, MPI_COMM_WORLD);
+			}
+			if (rank > 0){
+				MPI_Recv(prev_last_row, columns, MPI_INT, rank - 1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+			}
 
 			MPI_Barrier( MPI_COMM_WORLD );
-	
+
 			int particle;
 			for( particle = 0; particle < num_particles; particle++ ) {
 				if (particles[ particle ].pos_row / PRECISION > my_last_row || particles[ particle ].pos_row / PRECISION < my_first_row) continue;
@@ -533,17 +512,13 @@ int main(int argc, char *argv[]) {
 
 				if(rank == 0 || row > 0) {
 					update_flow( flow, flow_copy, particle_locations, row, col, columns, 0, NULL );
-
 				}else{
 					update_flow( flow, flow_copy, particle_locations, row, col, columns, 0, prev_last_row );
 				}
-				
 				particles[ particle ].old_flow = accessMat( flow, row, col );
 			}
-
 			
 			for( particle = 0; particle < num_particles; particle++ ) {
-
 				if (particles[ particle ].pos_row / PRECISION > my_last_row || particles[ particle ].pos_row / PRECISION < my_first_row) continue;
 				
 				int row = ((particles[ particle ].pos_row) / PRECISION) - my_first_row;
@@ -552,30 +527,19 @@ int main(int argc, char *argv[]) {
 
 				int back = (int)( (long)particles[ particle ].old_flow * resistance / PRECISION ) / accessMat( particle_locations, row, col );
 				accessMat( flow, row, col ) -= back;
-				if(rank == 0){
-					printf("BACK %d\n",back);
-				}
+				
 				if(row == 0 && rank > 0){
-					prev_last_row[ col ] += back / 2;
-					//accessMat( prev_last_row, 0, col ) += back / 2;
-
+					accessMat( prev_last_row, 0, col ) += back / 2;
 					if ( col > 0 )
-						//accessMat( prev_last_row, 0, col-1 ) += back / 4;
-						prev_last_row[ col-1 ] += back / 4;	
+						accessMat( prev_last_row, 0, col-1 ) += back / 4;
 					else
-						//accessMat( prev_last_row, 0, col ) += back / 4;
-						prev_last_row[ col ] += back / 4;
+						accessMat( prev_last_row, 0, col ) += back / 4;
 					if ( col < columns-1 )
-						//accessMat( prev_last_row, 0, col+1 ) += back / 4;
-						prev_last_row[ col+1 ] += back / 4;
+						accessMat( prev_last_row, 0, col+1 ) += back / 4;
 					else
-						//accessMat( prev_last_row, 0, col ) += back / 4;
-						prev_last_row[ col ] += back / 4;
-					
+						accessMat( prev_last_row, 0, col ) += back / 4;
 				} else {
-
 					accessMat( flow, row-1, col ) += back / 2;
-
 					if ( col > 0 )
 						accessMat( flow, row-1, col-1 ) += back / 4;
 					else
@@ -639,10 +603,30 @@ int main(int argc, char *argv[]) {
 		//int local_max = max_var;
 		//MPI_Allreduce(&local_max, &max_var, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
 
+		
 #ifdef DEBUG
 	// 4.7. DEBUG: Print the current state of the simulation at the end of each iteration
-	if ( rank == 1 )  {
-		print_status( iter, my_rows, columns, flow, num_particles, particle_locations, max_var );
+	// Ricompone flow e particle_locations da tutti i processi, poi stampa solo sul rank 0
+	int *flow_all = NULL;
+	int *particle_locations_all = NULL;
+
+	if (rank == 0) {
+		flow_all = (int *)malloc(rows * columns * sizeof(int));
+		particle_locations_all = (int *)malloc(rows * columns * sizeof(int));
+	}
+
+	MPI_Gather(flow, my_rows * columns, MPI_INT,
+			   flow_all, my_rows * columns, MPI_INT,
+			   0, MPI_COMM_WORLD);
+
+	MPI_Gather(particle_locations, my_rows * columns, MPI_INT,
+			   particle_locations_all, my_rows * columns, MPI_INT,
+			   0, MPI_COMM_WORLD);
+
+	if (rank == 0) {
+		print_status(iter, rows, columns, flow_all, num_particles, particle_locations_all, max_var);
+		free(flow_all);
+		free(particle_locations_all);
 	}
 #endif
 
