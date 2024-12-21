@@ -105,28 +105,38 @@ int update_flow( int *flow, int *flow_copy, int *particle_locations, int row, in
 			accessMat( flow, row, col ) = 
 				( 
 				accessMat( flow_copy, row, col ) + 
-				accessMat( prev_last_row, 0, col ) * 2 + 
-				accessMat( prev_last_row, 0, col+1 ) 
+				prev_last_row[col] * 2 +
+				prev_last_row[col+1]
 				) / 4;
+				//accessMat( prev_last_row, 0, col ) * 2 + 
+				//accessMat( prev_last_row, 0, col+1 ) 
+				
 		} 
 		// Update if border right
 		if ( col == columns-1 ) {
 			accessMat( flow, row, col ) = 
 				( 
 				accessMat( flow_copy, row, col ) + 
-				accessMat( prev_last_row, 0, col ) * 2 + 
-				accessMat( prev_last_row, 0, col-1 ) 
+				prev_last_row[col] * 2 +
+				prev_last_row[col-1]
 				) / 4;
+				//accessMat(prev_last_row, 0, col  ) * 2 + 
+				//accessMat( prev_last_row, 0, col-1 ) 
+				
 		}
 		// Update in central part
 		if ( col > 0 && col < columns-1 ) {
 			accessMat( flow, row, col ) = 
 				( 
 				accessMat( flow_copy, row, col ) + 
-				accessMat( prev_last_row, 0, col ) * 2 + 
-				accessMat( prev_last_row, 0, col-1 ) +
-				accessMat( prev_last_row, 0, col+1 ) 
+				prev_last_row[col] * 2 +
+				prev_last_row[col-1] +
+				prev_last_row[col+1]
 				) / 5;
+				//accessMat( prev_last_row, 0, col ) * 2 + 
+				//accessMat( prev_last_row, 0, col-1 ) +
+				//accessMat( prev_last_row, 0, col+1 ) 
+				
 		}
 	}
 
@@ -414,13 +424,19 @@ int main(int argc, char *argv[]) {
 
 	/* 3. Initialization */
 	flow = (int *)malloc( sizeof(int) * (size_t)my_rows * (size_t)columns );
+	
+	size_t allocated_rows = ( (sizeof(int) * (size_t)my_rows * (size_t)columns ) / ( sizeof(int) * columns ) );
+	printf("Flow array allocated rows: %zu\n", allocated_rows);
+
 	flow_copy = (int *)malloc( sizeof(int) * (size_t)my_rows * (size_t)columns );
 	particle_locations = (int *)malloc( sizeof(int) * (size_t)my_rows * (size_t)columns );
 
 	// Buffer che include l'ultima riga del processo precedente
 	int *prev_last_row = NULL;
+	int *prev_last_row_copy = NULL;
 	if (rank > 0) {
 	    prev_last_row = (int *)malloc(sizeof(int) * columns);
+		prev_last_row_copy = (int *)malloc(sizeof(int) * columns);		
 	    if (prev_last_row == NULL) {
 	        fprintf(stderr, "-- Error allocating memory for prev_last_row\n");
 	        MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
@@ -477,7 +493,11 @@ int main(int argc, char *argv[]) {
 				// Fixed particles
 				if ( mass == 0 ) continue;
 				// Movable particles
-				move_particle( flow, particles, particle, my_rows, columns , rank, size);
+				if (rank > 0 && (particles[ particle ].pos_row / PRECISION) - my_first_row == 0) {
+					move_particle( prev_last_row, particles, particle, my_rows, columns , rank, size);
+				} else {
+					move_particle( flow, particles, particle, my_rows, columns , rank, size);
+				}
 			} 
 
         	
@@ -490,24 +510,13 @@ int main(int argc, char *argv[]) {
 			}
 		} // End particles movements
 #endif // MODULE3
-		MPI_Barrier( MPI_COMM_WORLD );
-
 
 		if (rank == 0) {
 			printf("Elements of the last row of the flow matrix in rank 0:\n");
 			for (int i = 0; i < columns; i++) {
-				printf("%d ", accessMat(flow, my_rows - 1, i));
+				printf("%d ", accessMat(flow, my_rows-1, i));
 			}
 			printf("\n");
-		}
-		
-		if ( rank < size - 1) {
-
-			MPI_Send(&flow[(my_rows - 1) * columns], columns, MPI_INT, rank + 1, 0, MPI_COMM_WORLD);
-		}
-
-		if (rank > 0){
-			MPI_Recv(prev_last_row, columns, MPI_INT, rank - 1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 		}
 		
 		if (rank == 1) {
@@ -517,13 +526,12 @@ int main(int argc, char *argv[]) {
 			}
 			printf("\n");
 		}
+
+			
 		// 4.3. Effects due to particles each STEPS iterations
 		if ( iter % STEPS == 1 ) {
+
 			
-
-
-			MPI_Barrier( MPI_COMM_WORLD );
-	
 			int particle;
 			for( particle = 0; particle < num_particles; particle++ ) {
 				if (particles[ particle ].pos_row / PRECISION > my_last_row || particles[ particle ].pos_row / PRECISION < my_first_row) continue;
@@ -535,13 +543,12 @@ int main(int argc, char *argv[]) {
 					update_flow( flow, flow_copy, particle_locations, row, col, columns, 0, NULL );
 
 				}else{
-					update_flow( flow, flow_copy, particle_locations, row, col, columns, 0, prev_last_row );
+					update_flow( flow, flow_copy, particle_locations, row, col, columns, 0, prev_last_row);
 				}
 				
 				particles[ particle ].old_flow = accessMat( flow, row, col );
 			}
 
-			
 			for( particle = 0; particle < num_particles; particle++ ) {
 
 				if (particles[ particle ].pos_row / PRECISION > my_last_row || particles[ particle ].pos_row / PRECISION < my_first_row) continue;
@@ -552,9 +559,7 @@ int main(int argc, char *argv[]) {
 
 				int back = (int)( (long)particles[ particle ].old_flow * resistance / PRECISION ) / accessMat( particle_locations, row, col );
 				accessMat( flow, row, col ) -= back;
-				if(rank == 0){
-					printf("BACK %d\n",back);
-				}
+
 				if(row == 0 && rank > 0){
 					prev_last_row[ col ] += back / 2;
 					//accessMat( prev_last_row, 0, col ) += back / 2;
@@ -589,14 +594,9 @@ int main(int argc, char *argv[]) {
 
 			MPI_Barrier( MPI_COMM_WORLD );
 
-			if(rank > 0){
-				MPI_Send(prev_last_row, columns, MPI_INT, rank - 1, 0, MPI_COMM_WORLD);
-			}
-			if(rank < size - 1){
-				MPI_Recv(&flow[(my_rows - 1) * columns], columns, MPI_INT, rank + 1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-			}
 
 		} // End effects
+
 #endif // MODULE2
 
 		// PROPAGATION
@@ -608,6 +608,15 @@ int main(int argc, char *argv[]) {
 
 		// MPI: Wait for all processes to finish copying
 		MPI_Barrier( MPI_COMM_WORLD );
+			
+		if ( rank < size - 1) {
+			MPI_Send(&flow[(my_rows - 1) * columns], columns, MPI_INT, rank + 1, 0, MPI_COMM_WORLD);
+		}
+		if (rank > 0){
+			MPI_Recv(prev_last_row, columns, MPI_INT, rank - 1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+		}
+		
+		MPI_Barrier( MPI_COMM_WORLD );
 
 		// 4.5. Propagation stage
 		// 4.5.1. Initialize data to detect maximum variability
@@ -618,16 +627,17 @@ int main(int argc, char *argv[]) {
 		if ( wave_front == 0 ) wave_front = STEPS;
 
 		int wave;
-		for( wave = wave_front; wave < my_last_row; wave += STEPS) {
+		for( wave = wave_front; wave < my_last_row + 1; wave += STEPS) {
+			printf("Rank: %d, wave_front: %d, iter: %d, my_last_row: %d\n", rank, wave, iter, my_last_row);
 			if ( wave < my_first_row ) continue;
 			if ( wave > my_last_row ) break;
 			int col;
 			for( col=0; col<columns; col++) {
 				int var = 0;
 				if ( wave - my_first_row == 0) {
-					var = update_flow( flow, flow_copy, particle_locations, wave - my_first_row, col, columns, 1, prev_last_row );
+					var = update_flow( flow, flow_copy, particle_locations, wave - my_first_row, col, columns, 0, prev_last_row );
 				} else {
-					var = update_flow( flow, flow_copy, particle_locations, wave - my_first_row, col, columns, 1, NULL );
+					var = update_flow( flow, flow_copy, particle_locations, wave - my_first_row, col, columns, 0, NULL );
 				}
 				if ( var > max_var ) {
 					max_var = var;
@@ -641,12 +651,30 @@ int main(int argc, char *argv[]) {
 
 #ifdef DEBUG
 	// 4.7. DEBUG: Print the current state of the simulation at the end of each iteration
-	if ( rank == 1 )  {
-		print_status( iter, my_rows, columns, flow, num_particles, particle_locations, max_var );
+	int *flow_all = NULL;
+	int *particle_locations_all = NULL;
+
+	if (rank == 0) {
+		flow_all = (int *)malloc(rows * columns * sizeof(int));
+		particle_locations_all = (int *)malloc(rows * columns * sizeof(int));
+	}
+
+	MPI_Gather(flow, my_rows * columns, MPI_INT,
+			   flow_all, my_rows * columns, MPI_INT,
+			   0, MPI_COMM_WORLD);
+
+	MPI_Gather(particle_locations, my_rows * columns, MPI_INT,
+			   particle_locations_all, my_rows * columns, MPI_INT,
+			   0, MPI_COMM_WORLD);
+
+	if (rank == 0) {
+		print_status(iter, rows, columns, flow_all, num_particles, particle_locations_all, max_var);
+		free(flow_all);
+		free(particle_locations_all);
 	}
 #endif
 
-	
+	MPI_Barrier( MPI_COMM_WORLD );
 
 	// End iterations
 	}	
